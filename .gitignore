@@ -1,0 +1,13 @@
+# server
+server/.venv/
+server/data/
+server/__pycache__/
+server/**/__pycache__/
+
+# ui
+ui/node_modules/
+ui/dist/
+ui/*.tsbuildinfo
+
+# logs
+*.log
