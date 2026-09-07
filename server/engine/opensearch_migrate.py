@@ -342,11 +342,13 @@ def start_reindex(index, batch_size, rps):
         "dest": {"index": index, "op_type": "index"},
         "conflicts": "proceed",
     }
+    # Rate limiting is a query parameter, NOT a body field.
+    # ES/OpenSearch both use ?requests_per_second=N (body "rate" field causes HTTP 400).
+    url = "%s/_reindex?wait_for_completion=false" % TARGET
     if rps > 0:
-        body["rate"] = "%d/s" % rps
+        url += "&requests_per_second=%d" % rps
 
-    code, resp = jpost("%s/_reindex?wait_for_completion=false" % TARGET, body,
-                       timeout=60, is_target=True)
+    code, resp = jpost(url, body, timeout=60, is_target=True)
     if code == 200 and "task" in resp:
         return resp["task"]
     log("  ERROR starting reindex: HTTP %d %s" % (code, json.dumps(resp)[:300]))
