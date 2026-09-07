@@ -33,14 +33,14 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # ---------------------------------------------------------------------------
 class ClusterRef(BaseModel):
     url: str = Field(..., examples=["http://qosdata01.p01.eng.sjc01.qualys.com:50140"])
-    auth: str = Field(..., description="user:password")
+    auth: str = Field("", description="user:password (optional — omit for no-auth clusters)")
 
 
 class PlanRequest(BaseModel):
     source_url: str
-    source_auth: str
+    source_auth: str = ""
     target_url: str
-    target_auth: str
+    target_auth: str = ""
 
 
 class RunRequest(PlanRequest):

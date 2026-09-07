@@ -39,14 +39,15 @@ export function ClusterCard({ label, url, auth, onChange, disabled }: Props) {
       </div>
       <div className="row mt">
         <div className="field">
-          <label>Basic auth (user:password)</label>
+          <label>Basic auth (user:password) — optional</label>
           <input value={auth} disabled={disabled} type={show ? "text" : "password"} spellCheck={false}
+            placeholder="leave empty for no-auth clusters"
             onChange={(e) => { onChange(url, e.target.value); setInfo(null); }} />
         </div>
         <button className="btn btn-sm fixed" style={{ marginTop: 16 }} onClick={() => setShow((s) => !s)}>
           {show ? "hide" : "show"}
         </button>
-        <button className="btn btn-sm fixed" style={{ marginTop: 16 }} onClick={test} disabled={busy || disabled || !url || !auth}>
+        <button className="btn btn-sm fixed" style={{ marginTop: 16 }} onClick={test} disabled={busy || disabled || !url}>
           {busy ? "Testing…" : "Test"}
         </button>
       </div>

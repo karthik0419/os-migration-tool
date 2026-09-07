@@ -86,7 +86,7 @@ def _engine_env(source_auth: str, target_auth: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 def cluster_info(url: str, auth: str, timeout: int = 15) -> dict[str, Any]:
     url = url.rstrip("/")
-    headers = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode()}
+    headers = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode()} if auth else {}
 
     def get(path: str) -> Any:
         req = urllib.request.Request(url + path, headers=headers)
@@ -380,8 +380,8 @@ class RunRegistry:
         task_cancel: str | None = None
         if run.current_task and run.target_auth:
             url = f"{run.target_url.rstrip('/')}/_tasks/{run.current_task}/_cancel"
-            req = urllib.request.Request(url, method="POST", headers={
-                "Authorization": "Basic " + base64.b64encode(run.target_auth.encode()).decode()})
+            cancel_headers = {"Authorization": "Basic " + base64.b64encode(run.target_auth.encode()).decode()} if run.target_auth else {}
+            req = urllib.request.Request(url, method="POST", headers=cancel_headers)
             try:
                 with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as r:
                     task_cancel = f"HTTP {r.getcode()}"

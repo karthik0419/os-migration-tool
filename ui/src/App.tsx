@@ -11,10 +11,22 @@ const DEFAULT_OPTS: RunOptions = { rps: 200, pause: 30, heap_threshold: 85, unas
 
 const parseManual = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
 
+// localStorage helpers — persist cluster URLs + auth + run options across reloads
+const LS_KEY = "osmt:clusters";
+type SavedState = { src: { url: string; auth: string }; tgt: { url: string; auth: string }; opts: RunOptions };
+function loadSaved(): Partial<SavedState> {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); } catch { return {}; }
+}
+function saveSaved(s: Partial<SavedState>) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch { /* ignore quota */ }
+}
+
 export default function App() {
-  // step 1 — clusters
-  const [src, setSrc] = useState({ url: "", auth: "" });
-  const [tgt, setTgt] = useState({ url: "", auth: "" });
+  const _saved = loadSaved();
+
+  // step 1 — clusters (restored from localStorage on first render)
+  const [src, setSrc] = useState(_saved.src ?? { url: "", auth: "" });
+  const [tgt, setTgt] = useState(_saved.tgt ?? { url: "", auth: "" });
 
   // step 2 — plan
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -24,8 +36,8 @@ export default function App() {
   const [mode, setMode] = useState<"plan" | "manual" | "discover">("plan");
   const [manual, setManual] = useState("");
 
-  // step 3 — run
-  const [opts, setOpts] = useState<RunOptions>(DEFAULT_OPTS);
+  // step 3 — run (opts also restored from localStorage)
+  const [opts, setOpts] = useState<RunOptions>(_saved.opts ?? DEFAULT_OPTS);
   const [dryRun, setDryRun] = useState(true);
   const [showAdv, setShowAdv] = useState(false);
   const [armed, setArmed] = useState(false);
@@ -41,7 +53,10 @@ export default function App() {
   const refreshRuns = useCallback(() => { api.listRuns().then(setRuns).catch(() => undefined); }, []);
   useEffect(refreshRuns, [refreshRuns]);
 
-  const ready = !!(src.url && src.auth && tgt.url && tgt.auth);
+  // Persist cluster URLs + opts to localStorage on every change (auth is optional)
+  useEffect(() => { saveSaved({ src, tgt, opts }); }, [src, tgt, opts]);
+
+  const ready = !!(src.url && tgt.url);  // auth is optional
   const busy = run?.status === "running" || run?.status === "pending";
 
   async function doPlan() {

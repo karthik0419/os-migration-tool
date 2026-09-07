@@ -114,6 +114,8 @@ def log(msg):
 # HTTP helpers
 # ---------------------------------------------------------------------------
 def _auth_header(auth_str):
+    if not auth_str:
+        return None
     return "Basic " + base64.b64encode(auth_str.encode()).decode()
 
 
@@ -125,9 +127,13 @@ def _tgt_auth():
     return _auth_header(TARGET_AUTH)
 
 
+def _auth_headers(is_target=False) -> dict:
+    h = _tgt_auth() if is_target else _src_auth()
+    return {"Authorization": h} if h else {}
+
+
 def jget(url, timeout=30, is_target=False):
-    auth = _tgt_auth() if is_target else _src_auth()
-    req = urllib.request.Request(url, headers={"Authorization": auth})
+    req = urllib.request.Request(url, headers=_auth_headers(is_target))
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as r:
             return json.loads(r.read().decode())
@@ -138,10 +144,9 @@ def jget(url, timeout=30, is_target=False):
 
 
 def jpost(url, body, timeout=120, is_target=False):
-    auth = _tgt_auth() if is_target else _src_auth()
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method="POST", headers={
-        "Authorization": auth, "Content-Type": "application/json"})
+        **_auth_headers(is_target), "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as r:
             return r.getcode(), json.loads(r.read().decode())
@@ -157,10 +162,9 @@ def jpost(url, body, timeout=120, is_target=False):
 
 
 def jput(url, body, timeout=60, is_target=True):
-    auth = _tgt_auth() if is_target else _src_auth()
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method="PUT", headers={
-        "Authorization": auth, "Content-Type": "application/json"})
+        **_auth_headers(is_target), "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as r:
             return r.getcode(), json.loads(r.read().decode())
@@ -329,13 +333,14 @@ def wait_for_source_safe(max_wait=3600):
 # Reindex logic
 # ---------------------------------------------------------------------------
 def start_reindex(index, batch_size, rps):
+    # Build remote block — include username/password only if auth is provided
+    remote_block = {"host": SOURCE}
+    if SOURCE_AUTH and ":" in SOURCE_AUTH:
+        remote_block["username"] = SOURCE_AUTH.split(":")[0]
+        remote_block["password"] = SOURCE_AUTH.split(":", 1)[1]
     body = {
         "source": {
-            "remote": {
-                "host": SOURCE,
-                "username": SOURCE_AUTH.split(":")[0] if ":" in SOURCE_AUTH else "",
-                "password": SOURCE_AUTH.split(":")[1] if ":" in SOURCE_AUTH else "",
-            },
+            "remote": remote_block,
             "index": index,
             "size": batch_size,
         },
@@ -655,12 +660,9 @@ def main():
 
     SOURCE = args.source
     TARGET = args.target
-    SOURCE_AUTH = args.source_auth or os.environ.get("OS_MIGRATE_SOURCE_AUTH")
-    TARGET_AUTH = args.target_auth or os.environ.get("OS_MIGRATE_TARGET_AUTH")
-    if not SOURCE_AUTH or not TARGET_AUTH:
-        print("ERROR: source/target auth required (--source-auth/--target-auth or "
-              "OS_MIGRATE_SOURCE_AUTH/OS_MIGRATE_TARGET_AUTH env vars)", flush=True)
-        sys.exit(2)
+    SOURCE_AUTH = args.source_auth or os.environ.get("OS_MIGRATE_SOURCE_AUTH", "")
+    TARGET_AUTH = args.target_auth or os.environ.get("OS_MIGRATE_TARGET_AUTH", "")
+    # Auth is optional — clusters may have no auth enabled
     HEAP_THRESHOLD = args.heap_threshold
     UNASSIGNED_THRESHOLD = args.unassigned_threshold
     SEARCH_QUEUE_THRESHOLD = args.queue_threshold
@@ -712,8 +714,8 @@ def main():
     total = len(all_indices)
     log("=" * 80)
     log("OPENSEARCH CROSS-CLUSTER REINDEX MIGRATION")
-    log("  Source: %s (%s)" % (SOURCE, SOURCE_AUTH.split(":")[0]))
-    log("  Target: %s (%s)" % (TARGET, TARGET_AUTH.split(":")[0]))
+    log("  Source: %s (%s)" % (SOURCE, SOURCE_AUTH.split(":")[0] if SOURCE_AUTH else "no-auth"))
+    log("  Target: %s (%s)" % (TARGET, TARGET_AUTH.split(":")[0] if TARGET_AUTH else "no-auth"))
     log("  op_type=index ONLY - NO deletion, NO data loss")
     log("  Total indices to process: %d" % total)
     log("  SOURCE PROTECTION: heap<%d%%, queue<%d, unassigned<%d, pause=%ds" % (
