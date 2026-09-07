@@ -616,6 +616,94 @@ def discover_mismatched_indices():
 
 
 # ---------------------------------------------------------------------------
+# Template + alias sync
+# ---------------------------------------------------------------------------
+def sync_templates():
+    """Copy index templates from source to target."""
+    copied = 0
+    failed = 0
+
+    # Legacy templates (_template)
+    templates = jget("%s/_template" % SOURCE, timeout=30, is_target=False)
+    if templates:
+        for name, body in templates.items():
+            # Skip built-in templates
+            if name.startswith("."):
+                continue
+            code, resp = jput("%s/_template/%s" % (TARGET, name), body, is_target=True)
+            if code in (200, 201):
+                log("  TEMPLATE: copied legacy '%s'" % name)
+                copied += 1
+            else:
+                log("  TEMPLATE: FAILED legacy '%s' HTTP %d %s" % (name, code, json.dumps(resp)[:200]))
+                failed += 1
+
+    # Composable / index templates (OpenSearch 2.x+ / ES 7.x+)
+    try:
+        ct = jget("%s/_index_template" % SOURCE, timeout=30, is_target=False)
+        if ct and "index_templates" in ct:
+            for entry in ct["index_templates"]:
+                name = entry.get("name", "")
+                if name.startswith("."):
+                    continue
+                body = {"index_patterns": entry.get("index_template", {}).get("index_patterns", []),
+                        "template": entry.get("index_template", {}).get("template", {}),
+                        "priority": entry.get("index_template", {}).get("priority", 0)}
+                # Strip any read-only fields
+                tmpl = body.get("template", {})
+                if "settings" in tmpl:
+                    tmpl["settings"] = _filter_live_only(tmpl["settings"])
+                code, resp = jput("%s/_index_template/%s" % (TARGET, name), body, is_target=True)
+                if code in (200, 201):
+                    log("  TEMPLATE: copied composable '%s'" % name)
+                    copied += 1
+                else:
+                    log("  TEMPLATE: FAILED composable '%s' HTTP %d %s" % (name, code, json.dumps(resp)[:200]))
+                    failed += 1
+    except Exception as e:
+        log("  TEMPLATE: composable query failed (non-fatal): %s" % str(e)[:200])
+
+    log("  Templates: %d copied, %d failed" % (copied, failed))
+    return copied, failed
+
+
+def sync_aliases(indices):
+    """Recreate source aliases on target (only for indices that were migrated)."""
+    created = 0
+    skipped = 0
+    for idx in indices:
+        # Get aliases from source
+        src_aliases = jget("%s/%s/_alias" % (SOURCE, idx), timeout=15, is_target=False)
+        if not src_aliases or idx not in src_aliases:
+            continue
+        alias_map = src_aliases[idx].get("aliases", {})
+        if not alias_map:
+            continue
+        # Check target aliases
+        tgt_aliases = jget("%s/%s/_alias" % (TARGET, idx), timeout=15, is_target=True)
+        tgt_existing = set()
+        if tgt_aliases and idx in tgt_aliases:
+            tgt_existing = set(tgt_aliases[idx].get("aliases", {}).keys())
+
+        for alias_name, alias_body in alias_map.items():
+            if alias_name in tgt_existing:
+                skipped += 1
+                continue
+            body = {"actions": [{"add": {"index": idx, "alias": alias_name}}]}
+            if alias_body:
+                body["actions"][0]["add"].update(alias_body)
+            code, resp = jpost("%s/_aliases" % TARGET, body, timeout=15, is_target=True)
+            if code in (200, 201):
+                log("  ALIAS: %s -> %s on target" % (alias_name, idx))
+                created += 1
+            else:
+                log("  ALIAS: FAILED %s -> %s HTTP %d %s" % (alias_name, idx, code, json.dumps(resp)[:200]))
+
+    log("  Aliases: %d created, %d already existed" % (created, skipped))
+    return created, skipped
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -656,6 +744,12 @@ def main():
     parser.add_argument("--copy-settings", action="store_true",
                         help="For source-only indices, copy source index settings (analyzers, "
                              "shard/replica count) instead of defaulting to 5 shards / 1 replica")
+    parser.add_argument("--sync-templates", action="store_true",
+                        help="Copy index templates from source to target before reindexing. "
+                             "Includes both legacy and composable templates.")
+    parser.add_argument("--sync-aliases", action="store_true",
+                        help="Recreate source aliases on target after reindexing. "
+                             "Only creates aliases that don't already exist on target.")
     args = parser.parse_args()
 
     SOURCE = args.source
@@ -669,6 +763,8 @@ def main():
     PAUSE_BETWEEN = args.pause
     SYNC_MAPPING = args.sync_mapping
     COPY_SETTINGS = args.copy_settings
+    SYNC_TEMPLATES = args.sync_templates
+    SYNC_ALIASES = args.sync_aliases
 
     ts = _utcnow().strftime("%Y%m%d_%H%M%S")
     LOG_FILE = args.log_file or os.path.join(tempfile.gettempdir(), "os_migrate_%s.log" % ts)
@@ -724,6 +820,10 @@ def main():
         log("  SYNC MAPPING: enabled (PUT source mapping onto existing target indices)")
     if COPY_SETTINGS:
         log("  COPY SETTINGS: enabled (source-only indices get source settings, not 5/1 default)")
+    if SYNC_TEMPLATES:
+        log("  SYNC TEMPLATES: enabled (copy index templates from source to target)")
+    if SYNC_ALIASES:
+        log("  SYNC ALIASES: enabled (recreate source aliases on target after reindex)")
     if args.start_from > 1:
         log("  START_FROM=%d: skipping indices 1-%d (already processed)" % (
             args.start_from, args.start_from - 1))
@@ -731,6 +831,12 @@ def main():
     log("  Results: %s" % RESULTS_FILE)
     log("=" * 80)
     log("")
+
+    # Sync templates before reindex (so new indices inherit them)
+    if SYNC_TEMPLATES and not args.dry_run:
+        log("Syncing index templates...")
+        sync_templates()
+        log("")
 
     if args.dry_run:
         log("DRY RUN - no reindexing will occur.")
@@ -849,6 +955,13 @@ def main():
         if i < total - 1:
             log("  Pausing %ds between indices for source recovery..." % PAUSE_BETWEEN)
             time.sleep(PAUSE_BETWEEN)
+
+    # Sync aliases after reindex (so target has same alias structure)
+    if SYNC_ALIASES and not args.dry_run:
+        log("")
+        log("Syncing aliases...")
+        sync_aliases([e["index"] for e in all_indices])
+        log("")
 
     # Summary
     log("=" * 80)

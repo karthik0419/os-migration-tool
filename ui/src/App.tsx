@@ -13,12 +13,21 @@ const parseManual = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter
 
 // localStorage helpers — persist cluster URLs + auth + run options across reloads
 const LS_KEY = "osmt:clusters";
+const LS_PRESETS = "osmt:presets";
 type SavedState = { src: { url: string; auth: string }; tgt: { url: string; auth: string }; opts: RunOptions };
+type Preset = { name: string; src: { url: string; auth: string }; tgt: { url: string; auth: string } };
+
 function loadSaved(): Partial<SavedState> {
   try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); } catch { return {}; }
 }
 function saveSaved(s: Partial<SavedState>) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch { /* ignore quota */ }
+}
+function loadPresets(): Preset[] {
+  try { return JSON.parse(localStorage.getItem(LS_PRESETS) || "[]"); } catch { return []; }
+}
+function savePresets(p: Preset[]) {
+  try { localStorage.setItem(LS_PRESETS, JSON.stringify(p)); } catch { /* ignore */ }
 }
 
 export default function App() {
@@ -43,6 +52,14 @@ export default function App() {
   const [armed, setArmed] = useState(false);
   const [startErr, setStartErr] = useState<string | null>(null);
 
+  // cluster presets
+  const [presets, setPresets] = useState<Preset[]>(loadPresets);
+  const [presetName, setPresetName] = useState("");
+
+  // preflight
+  const [preflight, setPreflight] = useState<{ ok: boolean; checks: { name: string; ok: boolean; detail: string }[] } | null>(null);
+  const [preflighting, setPreflighting] = useState(false);
+
   // terminal / history
   const [run, setRun] = useState<Run | null>(null);
   const [lines, setLines] = useState<LogEvent[]>([]);
@@ -55,6 +72,52 @@ export default function App() {
 
   // Persist cluster URLs + opts to localStorage on every change (auth is optional)
   useEffect(() => { saveSaved({ src, tgt, opts }); }, [src, tgt, opts]);
+
+  // Preset handlers
+  function savePreset() {
+    const name = presetName.trim();
+    if (!name || !src.url || !tgt.url) return;
+    const updated = [...presets.filter((p) => p.name !== name), { name, src, tgt }];
+    setPresets(updated); savePresets(updated); setPresetName("");
+  }
+  function loadPreset(name: string) {
+    const p = presets.find((x) => x.name === name);
+    if (!p) return;
+    setSrc(p.src); setTgt(p.tgt);
+  }
+  function deletePreset(name: string) {
+    const updated = presets.filter((p) => p.name !== name);
+    setPresets(updated); savePresets(updated);
+  }
+
+  async function doPreflight() {
+    setPreflighting(true); setPreflight(null);
+    try {
+      const r = await api.preflight({ source_url: src.url, source_auth: src.auth, target_url: tgt.url, target_auth: tgt.auth });
+      setPreflight(r);
+    } catch (e) {
+      setPreflight({ ok: false, checks: [{ name: "error", ok: false, detail: e instanceof Error ? e.message : String(e) }] });
+    } finally {
+      setPreflighting(false);
+    }
+  }
+
+  /** One-click: discover mismatches + start a live run for ALL of them. */
+  async function doMigrateAll() {
+    if (!dryRun && !armed) { setArmed(true); setTimeout(() => setArmed(false), 6000); return; }
+    setArmed(false); setStartErr(null);
+    try {
+      // Start with auto-discover mode — engine will find and reindex all mismatches
+      const r = await api.startRun({
+        source_url: src.url, source_auth: src.auth, target_url: tgt.url, target_auth: tgt.auth,
+        indices: undefined, dry_run: dryRun, ...opts,
+      });
+      attach(r);
+      refreshRuns();
+    } catch (e) {
+      setStartErr(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   const ready = !!(src.url && tgt.url);  // auth is optional
   const busy = run?.status === "running" || run?.status === "pending";
@@ -142,9 +205,28 @@ export default function App() {
         <div className="col">
           <section className="card">
             <h2><span className="step">1</span> Clusters</h2>
+            {/* Preset dropdown */}
+            {presets.length > 0 && (
+              <div className="row" style={{ marginBottom: 10 }}>
+                <select className="fixed" style={{ width: 200 }} value="" onChange={(e) => { if (e.target.value) loadPreset(e.target.value); }}>
+                  <option value="">Load preset…</option>
+                  {presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+                </select>
+                {presets.map((p) => (
+                  <button key={p.name} className="btn btn-sm fixed" title={`Delete preset "${p.name}"`}
+                    onClick={() => deletePreset(p.name)} style={{ padding: "4px 8px" }}>x</button>
+                )).slice(-1)}
+              </div>
+            )}
             <ClusterCard label="Source" url={src.url} auth={src.auth} disabled={busy} onChange={(url, auth) => setSrc({ url, auth })} />
             <div style={{ height: 10 }} />
             <ClusterCard label="Target" url={tgt.url} auth={tgt.auth} disabled={busy} onChange={(url, auth) => setTgt({ url, auth })} />
+            {/* Save preset */}
+            <div className="row mt">
+              <input placeholder="preset name (e.g. p01 qels→qos)" value={presetName} disabled={busy || !ready}
+                onChange={(e) => setPresetName(e.target.value)} />
+              <button className="btn btn-sm fixed" onClick={savePreset} disabled={!presetName.trim() || !ready}>Save preset</button>
+            </div>
           </section>
 
           <section className="card">
@@ -184,6 +266,39 @@ export default function App() {
 
           <section className="card">
             <h2><span className="step">3</span> Run</h2>
+            {/* Pre-flight checks */}
+            <div className="row" style={{ marginBottom: 10 }}>
+              <button className="btn btn-sm fixed" onClick={doPreflight} disabled={!ready || preflighting || busy}>
+                {preflighting ? "Checking…" : "Pre-flight checks"}
+              </button>
+              {preflight && (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {preflight.ok ? "All checks passed" : `${preflight.checks.filter((c) => !c.ok).length} warning(s)`}
+                </span>
+              )}
+            </div>
+            {preflight && (
+              <div className="mt" style={{ marginBottom: 10 }}>
+                {preflight.checks.map((c) => (
+                  <div key={c.name} style={{ display: "flex", gap: 8, fontSize: 12, padding: "3px 0" }}>
+                    <span className={`dot ${c.ok ? "green" : "red"}`} style={{ marginTop: 5 }} />
+                    <span className="mono" style={{ flex: "0 0 130px" }}>{c.name}</span>
+                    <span className={c.ok ? "muted" : ""} style={{ color: c.ok ? undefined : "var(--red)" }}>{c.detail}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Quick migrate all */}
+            <div className="row" style={{ marginBottom: 10 }}>
+              <button className="btn btn-primary" onClick={doMigrateAll} disabled={!ready || busy}
+                title="Auto-discover all mismatched indices and reindex them all in one run">
+                {busy ? "Run in progress…"
+                  : dryRun ? "Dry run ALL (auto-discover)"
+                  : armed ? "Click again to confirm LIVE migrate all"
+                  : "Migrate ALL (one click)"}
+              </button>
+              <span className="muted" style={{ fontSize: 11 }}>discovers + reindexes every mismatch</span>
+            </div>
             <div className="row">
               <label className="row fixed" style={{ gap: 6, cursor: "pointer" }}>
                 <input type="checkbox" checked={dryRun} onChange={(e) => { setDryRun(e.target.checked); setArmed(false); }} /> Dry run (no writes)
@@ -205,6 +320,14 @@ export default function App() {
               </label>
               <label className="row fixed" style={{ gap: 6, cursor: "pointer" }} title="For source-only indices: copy source index settings (analyzers, shard/replica count) instead of defaulting to 5 shards / 1 replica.">
                 <input type="checkbox" checked={!!opts.copy_settings} onChange={(e) => setOpts({ ...opts, copy_settings: e.target.checked })} /> Copy settings
+              </label>
+            </div>
+            <div className="row mt" style={{ gap: 16 }}>
+              <label className="row fixed" style={{ gap: 6, cursor: "pointer" }} title="Copy index templates (legacy + composable) from source to target before reindexing. Skips built-in templates.">
+                <input type="checkbox" checked={!!opts.sync_templates} onChange={(e) => setOpts({ ...opts, sync_templates: e.target.checked })} /> Sync templates
+              </label>
+              <label className="row fixed" style={{ gap: 6, cursor: "pointer" }} title="After reindexing, recreate source aliases on target. Only creates aliases that don't already exist on target.">
+                <input type="checkbox" checked={!!opts.sync_aliases} onChange={(e) => setOpts({ ...opts, sync_aliases: e.target.checked })} /> Sync aliases
               </label>
             </div>
             {showAdv && (

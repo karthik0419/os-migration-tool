@@ -1,0 +1,11 @@
+server/.venv/
+server/data/
+server/__pycache__/
+server/**/__pycache__/
+ui/node_modules/
+ui/dist/
+*.log
+.git/
+.gitignore
+*.md
+setup.ps1

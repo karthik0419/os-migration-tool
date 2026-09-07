@@ -36,6 +36,8 @@ export interface RunOptions {
   start_from: number;
   sync_mapping?: boolean;
   copy_settings?: boolean;
+  sync_templates?: boolean;
+  sync_aliases?: boolean;
 }
 
 export interface RunRequest extends RunOptions {

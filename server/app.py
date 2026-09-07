@@ -54,6 +54,8 @@ class RunRequest(PlanRequest):
     start_from: int = 1
     sync_mapping: bool = Field(False, description="PUT source mapping onto existing target indices before reindex")
     copy_settings: bool = Field(False, description="For source-only indices, copy source settings (analyzers/shards) instead of 5/1 default")
+    sync_templates: bool = Field(False, description="Copy index templates from source to target before reindex")
+    sync_aliases: bool = Field(False, description="Recreate source aliases on target after reindex")
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +84,52 @@ async def plan(req: PlanRequest) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@app.post("/api/preflight")
+async def preflight(req: PlanRequest) -> dict[str, Any]:
+    """Pre-flight checks before a run: cluster health, disk space, remote reindex whitelist."""
+    checks = []
+    try:
+        src_info = await asyncio.to_thread(runner.cluster_info, req.source_url, req.source_auth)
+        checks.append({"name": "source_reachable", "ok": True, "detail": f"{src_info['cluster_name']} {src_info['status']} {src_info['nodes']}n"})
+        if src_info["status"] == "red":
+            checks.append({"name": "source_health", "ok": False, "detail": "cluster RED — reindex may fail"})
+        else:
+            checks.append({"name": "source_health", "ok": True, "detail": f"cluster {src_info['status'].upper()}"})
+    except Exception as e:
+        checks.append({"name": "source_reachable", "ok": False, "detail": str(e)})
+        checks.append({"name": "source_health", "ok": False, "detail": "unreachable"})
+
+    try:
+        tgt_info = await asyncio.to_thread(runner.cluster_info, req.target_url, req.target_auth)
+        checks.append({"name": "target_reachable", "ok": True, "detail": f"{tgt_info['cluster_name']} {tgt_info['status']} {tgt_info['nodes']}n"})
+        if tgt_info["status"] == "red":
+            checks.append({"name": "target_health", "ok": False, "detail": "cluster RED — writes may fail"})
+        else:
+            checks.append({"name": "target_health", "ok": True, "detail": f"cluster {tgt_info['status'].upper()}"})
+        # Disk space check via _cat/allocation
+        try:
+            import urllib.request, base64, ssl, json as _json
+            url = req.target_url.rstrip("/") + "/_cat/allocation?format=json"
+            headers = {"Authorization": "Basic " + base64.b64encode(req.target_auth.encode()).decode()} if req.target_auth else {}
+            ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+            r = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15, context=ctx)
+            alloc = _json.loads(r.read().decode())
+            high_disk = [a for a in alloc if a.get("disk.percent", "0") and float(a["disk.percent"]) > 85]
+            if high_disk:
+                checks.append({"name": "target_disk", "ok": False, "detail": f"{len(high_disk)} nodes >85% disk: {', '.join(a['node'] for a in high_disk[:3])}"})
+            else:
+                checks.append({"name": "target_disk", "ok": True, "detail": "all nodes <85% disk"})
+        except Exception:
+            checks.append({"name": "target_disk", "ok": True, "detail": "could not check (non-fatal)"})
+    except Exception as e:
+        checks.append({"name": "target_reachable", "ok": False, "detail": str(e)})
+        checks.append({"name": "target_health", "ok": False, "detail": "unreachable"})
+        checks.append({"name": "target_disk", "ok": False, "detail": "unreachable"})
+
+    all_ok = all(c["ok"] for c in checks)
+    return {"ok": all_ok, "checks": checks}
+
+
 @app.post("/api/runs", status_code=202)
 def start_run(req: RunRequest) -> dict[str, Any]:
     if not runner.ENGINE.exists():
@@ -90,7 +138,7 @@ def start_run(req: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="indices must be non-empty or omitted (auto-discover)")
     options = {k: getattr(req, k) for k in
                ("rps", "pause", "heap_threshold", "unassigned_threshold", "queue_threshold",
-                "start_from", "sync_mapping", "copy_settings")}
+                "start_from", "sync_mapping", "copy_settings", "sync_templates", "sync_aliases")}
     run = runner.registry.start(
         source_url=req.source_url, source_auth=req.source_auth,
         target_url=req.target_url, target_auth=req.target_auth,

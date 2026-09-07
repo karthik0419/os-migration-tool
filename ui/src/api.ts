@@ -27,6 +27,9 @@ export const api = {
   plan: (body: { source_url: string; source_auth: string; target_url: string; target_auth: string }) =>
     request<PlanResponse>("/plan", { method: "POST", body: JSON.stringify(body) }),
 
+  preflight: (body: { source_url: string; source_auth: string; target_url: string; target_auth: string }) =>
+    request<{ ok: boolean; checks: { name: string; ok: boolean; detail: string }[] }>("/preflight", { method: "POST", body: JSON.stringify(body) }),
+
   startRun: (body: RunRequest) => request<Run>("/runs", { method: "POST", body: JSON.stringify(body) }),
   listRuns: () => request<Run[]>("/runs"),
   getRun: (id: string) => request<Run>(`/runs/${id}`),

@@ -307,6 +307,10 @@ class RunRegistry:
             cmd.append("--sync-mapping")
         if options.get("copy_settings"):
             cmd.append("--copy-settings")
+        if options.get("sync_templates"):
+            cmd.append("--sync-templates")
+        if options.get("sync_aliases"):
+            cmd.append("--sync-aliases")
         cmd += ["--indices", ",".join(indices)] if indices else ["--discover"]
         if dry_run:
             cmd.append("--dry-run")

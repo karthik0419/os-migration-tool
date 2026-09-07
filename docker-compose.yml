@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  os-migration-tool:
+    build: .
+    container_name: os-migration-tool
+    ports:
+      - "8020:8020"
+    volumes:
+      # Persist run history + logs across container restarts
+      - osmt-data:/app/server/data
+      # Optionally mount a custom engine (for dev/testing)
+      # - ./server/engine/opensearch_migrate.py:/app/server/engine/opensearch_migrate.py:ro
+    environment:
+      - OSMT_HOST=0.0.0.0
+      - OSMT_PORT=8020
+      # Override plan timeout (seconds) if needed
+      # - OSMT_PLAN_TIMEOUT=900
+    restart: unless-stopped
+
+volumes:
+  osmt-data:
